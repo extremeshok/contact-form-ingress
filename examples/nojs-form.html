@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contact Form (No‑JS)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    form { max-width: 560px; display: grid; gap: .75rem; }
+    label { font-weight: 600; }
+    input, textarea, button { font: inherit; padding: .6rem .7rem; }
+    textarea { min-height: 140px; }
+    .sr-only { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <h1>Contact Us (No JavaScript)</h1>
+  <form action="/ingress.php" method="post" accept-charset="utf-8" novalidate>
+    <!-- Hidden token left empty on purpose: server accepts cookie token when posted token is empty -->
+    <input type="hidden" name="token" value="">
+    <!-- No dwell_ms without JS; that’s fine. -->
+    <!-- Honeypots -->
+    <div class="sr-only" aria-hidden="true">
+      <input type="text" name="website" tabindex="-1" autocomplete="off">
+      <input type="text" name="fax" tabindex="-1" autocomplete="off">
+    </div>
+
+    <label for="name">Name *</label>
+    <input type="text" id="name" name="name" minlength="6" required placeholder="Your full name">
+
+    <label for="email">Email *</label>
+    <input type="email" id="email" name="email" minlength="8" required placeholder="you@domain.com">
+
+    <label for="phone">Phone *</label>
+    <input type="tel" id="phone" name="phone" minlength="10" required placeholder="+27 …">
+
+    <label for="message">Message *</label>
+    <textarea id="message" name="message" minlength="40" required placeholder="Describe your needs."></textarea>
+
+    <label for="consent_text">Consent *</label>
+    <input type="text" id="consent_text" name="consent_text" required placeholder="Type: agree">
+
+    <button type="submit">Send</button>
+  </form>
+
+  <noscript>
+    <!-- Mint the CSRF cookie token with an invisible pixel -->
+    <img src="/ingress.php?cmd=token" alt="" width="1" height="1" class="sr-only">
+  </noscript>
+
+  <p>Note: This form works without JavaScript. The server accepts the token from the cookie when the posted token is empty.</p>
+</body>
+</html>
+

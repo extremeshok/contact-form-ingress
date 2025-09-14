@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JSON Submit (Sample)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    .row { display: grid; gap: .5rem; max-width: 680px; }
+    textarea, input, button { font: inherit; padding: .6rem .7rem; }
+    textarea { min-height: 160px; }
+    .ok { color: #0a662a; }
+    .err { color: #b00020; }
+    code { background: #f6f7f9; padding: .25rem .35rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>JSON Submission Example</h1>
+  <p>This page demonstrates posting JSON to <code>/ingress.php</code>. It mints a CSRF cookie first, then sends a JSON payload.</p>
+
+  <div class="row">
+    <label for="payload">Payload</label>
+    <textarea id="payload">{
+  "name": "Example User",
+  "email": "user@example.com",
+  "phone": "+27123456789",
+  "message": "This message is at least forty characters long and contains no links.",
+  "consent_text": "agree",
+  "offer": "Smoke test"
+}</textarea>
+    <button id="send">Send JSON</button>
+    <pre id="out"></pre>
+  </div>
+
+  <script>
+  (function(){
+    var out = document.getElementById('out');
+    function log(msg, cls){ out.textContent = (typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2)); out.className = cls||''; }
+    // Mint CSRF cookie
+    fetch('/ingress.php?cmd=token', {credentials:'include'})
+      .then(function(r){ return r.json(); })
+      .catch(function(){});
+
+    document.getElementById('send').addEventListener('click', function(){
+      var text = document.getElementById('payload').value;
+      var data = {};
+      try { data = JSON.parse(text); } catch(e) { log('Invalid JSON', 'err'); return; }
+      // Optional: copy cookie token into payload if present
+      var m = document.cookie.match(/(?:^|; )form_token=([^;]+)/);
+      if (m && !data.token) data.token = decodeURIComponent(m[1]);
+      fetch('/ingress.php', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(data)
+      })
+      .then(function(r){ return r.json(); })
+      .then(function(j){ if (j.ok) log(j, 'ok'); else log(j, 'err'); })
+      .catch(function(err){ log('Network error', 'err'); });
+    });
+  })();
+  </script>
+</body>
+</html>
+

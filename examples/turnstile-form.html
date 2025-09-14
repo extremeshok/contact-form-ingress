@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contact Form — Turnstile Example</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 2rem; }
+    form { max-width: 560px; display: grid; gap: .75rem; }
+    label { font-weight: 600; }
+    input, textarea, button { font: inherit; padding: .6rem .7rem; }
+    textarea { min-height: 140px; }
+    .msg { margin-top: 1rem; }
+    .ok { color: #0a662a; }
+    .err { color: #b00020; }
+  </style>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+</head>
+<body>
+  <h1>Contact Us (Cloudflare Turnstile)</h1>
+  <form id="contactForm" action="/ingress.php" method="post" accept-charset="utf-8" novalidate>
+    <input type="hidden" name="token" id="form_token">
+    <input type="hidden" name="dwell_ms" id="dwell_ms">
+    <input type="hidden" name="captcha_token" id="captcha_token">
+
+    <!-- Cloudflare Turnstile widget (replace with your real sitekey) -->
+    <div class="cf-turnstile" data-sitekey="YOUR_TURNSTILE_SITE_KEY" data-callback="onTurnstileToken"></div>
+
+    <label for="name">Name *</label>
+    <input type="text" id="name" name="name" minlength="6" required placeholder="Your full name">
+
+    <label for="email">Email *</label>
+    <input type="email" id="email" name="email" minlength="8" required placeholder="you@domain.com">
+
+    <label for="phone">Phone *</label>
+    <input type="tel" id="phone" name="phone" minlength="10" required placeholder="+27 …">
+
+    <label for="message">Message *</label>
+    <textarea id="message" name="message" minlength="40" required placeholder="Explain what you need."></textarea>
+
+    <label for="consent_text">Consent *</label>
+    <input type="text" id="consent_text" name="consent_text" required placeholder="Type: agree">
+
+    <button type="submit">Send</button>
+  </form>
+
+  <div id="result" class="msg" role="status" aria-live="polite"></div>
+
+  <noscript>
+    <img src="/ingress.php?cmd=token" alt="" width="1" height="1" style="position:absolute;left:-9999px;top:auto">
+  </noscript>
+
+  <script>
+  (function(){
+    var t0 = Date.now();
+    fetch('/ingress.php?cmd=token', {credentials:'include'}).catch(function(){});
+    window.onTurnstileToken = function(token){ var el=document.getElementById('captcha_token'); if(el) el.value=token; };
+    var form = document.getElementById('contactForm');
+    form.addEventListener('submit', function(ev){
+      var m = document.cookie.match(/(?:^|; )form_token=([^;]+)/);
+      if (m) { var h=document.getElementById('form_token'); if(h) h.value=decodeURIComponent(m[1]); }
+      var d=document.getElementById('dwell_ms'); if(d) d.value = Date.now() - t0;
+    });
+    form.addEventListener('submit', function(ev){
+      ev.preventDefault();
+      var data = new FormData(form);
+      fetch(form.action, { method:'POST', body:data, credentials:'include' })
+        .then(function(r){ return r.json(); })
+        .then(function(j){ var el=document.getElementById('result'); if(j&&j.ok){ el.textContent='Thanks! Ref: '+j.ref; el.className='msg ok'; form.reset(); } else { el.textContent='Error: '+(j&&j.error||'Unknown'); el.className='msg err'; }} )
+        .catch(function(){ var el=document.getElementById('result'); el.textContent='Network error'; el.className='msg err'; });
+    }, {once:true});
+  })();
+  </script>
+</body>
+</html>
+
