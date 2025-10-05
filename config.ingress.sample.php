@@ -27,7 +27,14 @@ return [
 
   // Optional JSON forward
   'json_forward_url' => '',
-  'json_forward_secret' => '',
+  'json_forward_secret' => 'CHANGE_ME_json_forward_secret',
+
+  'proxy' => [
+    'enabled' => false,
+    'trusted_proxies' => ['203.0.113.10'], // replace with your load balancer / proxy CIDRs
+    'trusted_headers' => ['x-forwarded-for','x-real-ip'],
+    'max_chain' => 5,
+  ],
 
   // Optional CAPTCHA
   'captcha' => [

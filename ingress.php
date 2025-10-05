@@ -1,7 +1,18 @@
 <?php
-/*
-ingress.php — secure, schema-less intake (JSON or form)
-Docs and examples: see README in the project root.
+/**
+################################################################################
+# Contact Form Ingress - secure, schema-less intake endpoint (JSON or form)
+# This script is property of eXtremeSHOK.com.
+# You are free to use, modify and distribute, however you may not remove this notice.
+# Copyright (c) Adrian Jon Kriel :: admin@extremeshok.com
+################################################################################
+# Script updates, documentation and issue tracker: https://github.com/extremeshok/contact-form-ingress
+################################################################################
+# License: MIT (https://opensource.org/license/mit/)
+################################################################################
+# Assumptions: PHP 8.1+ with cURL/SQLite, HTTPS deployment and writable storage dir outside web root.
+# Configuration: Review and customise the $CFG array below before putting into production.
+################################################################################
 */
 
 declare(strict_types=1);
@@ -11,6 +22,86 @@ header('X-Robots-Tag: noindex, nofollow, noarchive');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 
 header('Pragma: no-cache');
+
+$GLOBALS['INGRESS_CONFIG_ISSUES'] = ['fatal' => [], 'warnings' => []];
+$GLOBALS['INGRESS_CLIENT_INFO'] = [
+  'ip' => $_SERVER['REMOTE_ADDR'] ?? '',
+  'source' => 'remote_addr',
+  'chain' => []
+];
+
+function ingress_bootstrap_fail(array $issues, int $code = 500): void {
+  if (!headers_sent()) {
+    http_response_code($code);
+    header('Content-Type: application/json; charset=utf-8');
+  }
+  echo json_encode([
+    'ok' => false,
+    'error' => 'config_error',
+    'issues' => array_values($issues),
+  ]);
+  exit;
+}
+
+function ingress_collect_config_issues(array $cfg): array {
+  $fatal = [];
+  $warnings = [];
+
+  $secret = (string)($cfg['secret'] ?? '');
+  if ($secret === '' || $secret === 'CHANGE_ME_LONG_RANDOM') {
+    $fatal[] = 'secret must be replaced with a long random string';
+  }
+
+  if (isset($cfg['json_forward_secret'])) {
+    $jfSecret = (string)$cfg['json_forward_secret'];
+    if ($jfSecret === '' || $jfSecret === 'CHANGE_ME_json_forward_secret') {
+      $fatal[] = 'json_forward_secret must be configured with a non-empty secret';
+    }
+  }
+
+  $notifyRaw = strtolower((string)($cfg['notify_targets'] ?? ''));
+  $emailEnabled = strpos($notifyRaw, 'email') !== false;
+  if ($emailEnabled) {
+    $smtp = (array)($cfg['smtp'] ?? []);
+    $host = trim((string)($smtp['host'] ?? ''));
+    $user = trim((string)($smtp['user'] ?? ''));
+    $pass = (string)($smtp['pass'] ?? '');
+    $auth = strtolower((string)($smtp['auth'] ?? 'auto'));
+    if ($host === '' || $host === 'smtp.example.com') {
+      $fatal[] = 'smtp.host must be configured with your mail server';
+    }
+    $needsCredentials = !in_array($auth, ['none', ''], true);
+    if ($needsCredentials) {
+      if ($user === '' || $user === 'you@example.com') {
+        $fatal[] = 'smtp.user must be configured with your account user';
+      }
+      if ($pass === '' || $pass === 'APP_PASSWORD') {
+        $fatal[] = 'smtp.pass must be configured with your account password';
+      }
+    }
+  }
+
+  return ['fatal' => array_values(array_unique($fatal)), 'warnings' => array_values(array_unique($warnings))];
+}
+
+function ingress_current_cmd(): string {
+  static $cmd = null;
+  if ($cmd !== null) {
+    return $cmd;
+  }
+  $cmd = isset($_GET['cmd']) ? (string)$_GET['cmd'] : '';
+  if ($cmd === '' && !empty($_SERVER['QUERY_STRING'])) {
+    parse_str($_SERVER['QUERY_STRING'], $qsTmp);
+    if (isset($qsTmp['cmd'])) {
+      $cmd = (string)$qsTmp['cmd'];
+    }
+  }
+  return $cmd;
+}
+
+function ingress_is_diagnostics_request(string $cmd): bool {
+  return in_array($cmd, ['health', 'check'], true);
+}
 
 // Robust error handling/logging
 error_reporting(E_ALL);
@@ -94,9 +185,16 @@ $CFG = [
     'flush_queue' => false,
   ],
 
+  'proxy' => [
+    'enabled' => false,
+    'trusted_proxies' => [],        // e.g. ['10.0.0.0/8','203.0.113.10']
+    'trusted_headers' => ['x-forwarded-for','x-real-ip','forwarded'],
+    'max_chain' => 5,
+  ],
+
   // Optional: forward as JSON to n8n (no page changes)
   'json_forward_url'      => '',
-  'json_forward_secret'   => '',
+  'json_forward_secret'   => 'CHANGE_ME_json_forward_secret',
 
   // Accept payload type: 'json' | 'form' | 'both'
   'accept_payload'   => 'both',
@@ -182,6 +280,8 @@ try {
   }
 } catch (Throwable $e) { /* ignore */ }
 
+$GLOBALS['INGRESS_CONFIG_ISSUES'] = ingress_collect_config_issues($CFG);
+
 // ===================== HELPERS =====================
 function b64u(string $s): string { return rtrim(strtr(base64_encode($s), '+/', '-_'), '='); }
 function b64u_dec(string $s){
@@ -200,6 +300,131 @@ function parse_targets(string $csv): array {
     'email' => in_array('email', $t, true),
     'n8n'   => in_array('n8n', $t, true),
   ];
+}
+
+function ingress_ip_is_valid(string $ip): bool {
+  return filter_var($ip, FILTER_VALIDATE_IP) !== false;
+}
+
+function ingress_ip_in_cidr(string $ip, string $cidr): bool {
+  $cidr = trim($cidr);
+  if ($cidr === '') return false;
+  if (!ingress_ip_is_valid($ip)) return false;
+
+  if (strpos($cidr, '/') === false) {
+    return ingress_ip_is_valid($cidr) && strcasecmp($ip, $cidr) === 0;
+  }
+
+  [$subnet, $maskStr] = explode('/', $cidr, 2);
+  if (!ingress_ip_is_valid($subnet)) return false;
+  $mask = (int)$maskStr;
+  $ipBin = inet_pton($ip);
+  $subnetBin = inet_pton($subnet);
+  if ($ipBin === false || $subnetBin === false) return false;
+  $length = strlen($ipBin);
+  $maxBits = $length * 8;
+  if ($mask < 0 || $mask > $maxBits) return false;
+  $fullBytes = intdiv($mask, 8);
+  $remainingBits = $mask % 8;
+  if ($fullBytes > 0 && substr($ipBin, 0, $fullBytes) !== substr($subnetBin, 0, $fullBytes)) {
+    return false;
+  }
+  if ($remainingBits === 0) {
+    return true;
+  }
+  $maskByte = chr((~((1 << (8 - $remainingBits)) - 1)) & 0xFF);
+  return ((ord($ipBin[$fullBytes]) & ord($maskByte)) === (ord($subnetBin[$fullBytes]) & ord($maskByte)));
+}
+
+function ingress_ip_matches(string $ip, array $cidrs): bool {
+  foreach ($cidrs as $cidr) {
+    if (ingress_ip_in_cidr($ip, (string)$cidr)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function ingress_extract_ips_from_header(string $header, string $value): array {
+  $header = strtolower($header);
+  $value = trim($value);
+  if ($value === '') return [];
+  $ips = [];
+  if ($header === 'forwarded') {
+    // RFC 7239 Forwarded: for=192.0.2.60;proto=https;by=203.0.113.43
+    foreach (explode(',', $value) as $part) {
+      if (preg_match('/for=\"?\[?([a-fA-F0-9:\.]+)\]?\"?/i', $part, $m)) {
+        $ips[] = $m[1];
+      }
+    }
+  } else {
+    foreach (explode(',', $value) as $candidate) {
+      $ips[] = trim($candidate);
+    }
+  }
+  $clean = [];
+  foreach ($ips as $ip) {
+    $ip = trim($ip, " \"'[]");
+    if ($ip !== '' && ingress_ip_is_valid($ip)) {
+      $clean[] = $ip;
+    }
+  }
+  return $clean;
+}
+
+function ingress_resolve_client_ip(array $cfg): array {
+  $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+  $out = [
+    'ip' => $remote,
+    'remote_addr' => $remote,
+    'source' => 'remote_addr',
+    'chain' => $remote && ingress_ip_is_valid($remote) ? [$remote] : [],
+  ];
+
+  $proxy = (array)($cfg['proxy'] ?? []);
+  if (empty($proxy['enabled'])) {
+    return $out;
+  }
+
+  $trusted = array_filter(array_map('trim', (array)($proxy['trusted_proxies'] ?? [])));
+  if ($remote === '' || empty($trusted) || !ingress_ip_matches($remote, $trusted)) {
+    return $out;
+  }
+
+  $headers = array_map('strtolower', (array)($proxy['trusted_headers'] ?? []));
+  $maxChain = (int)($proxy['max_chain'] ?? 5);
+  if ($maxChain <= 0) { $maxChain = 5; }
+
+  foreach ($headers as $header) {
+    $serverKey = 'HTTP_' . strtoupper(str_replace('-', '_', $header));
+    if (empty($_SERVER[$serverKey])) {
+      continue;
+    }
+    $candidates = ingress_extract_ips_from_header($header, (string)$_SERVER[$serverKey]);
+    if (empty($candidates)) {
+      continue;
+    }
+    if (count($candidates) > $maxChain) {
+      $candidates = array_slice($candidates, 0, $maxChain);
+    }
+    $client = null;
+    foreach ($candidates as $ip) {
+      if (!ingress_ip_matches($ip, $trusted)) {
+        $client = $ip;
+        break;
+      }
+    }
+    if ($client === null) {
+      $client = $candidates[0];
+    }
+    $out['ip'] = $client;
+    $out['source'] = $header;
+    $out['chain'] = $candidates;
+    $_SERVER['INGRESS_CLIENT_IP'] = $client;
+    return $out;
+  }
+
+  return $out;
 }
 
 function lc_str(string $s): string {
@@ -296,7 +521,7 @@ function verify_captcha(array $cfg, string $token, string $ip): array {
 }
 
 function log_event(string $stage, array $ctx = []): void {
-  global $CFG, $ref;
+  global $CFG, $ref, $INGRESS_CLIENT_INFO;
   if (empty($CFG['debug'])) return;
   // scrub secrets recursively
   $scrub = function($v) use (&$scrub) {
@@ -336,6 +561,9 @@ function log_event(string $stage, array $ctx = []): void {
     'ref'   => $ref ?? null,
     'stage' => $stage,
     'ip'    => $_SERVER['REMOTE_ADDR'] ?? '',
+    'client_ip' => $INGRESS_CLIENT_INFO['ip'] ?? ($_SERVER['INGRESS_CLIENT_IP'] ?? ($_SERVER['REMOTE_ADDR'] ?? '')),
+    'client_source' => $INGRESS_CLIENT_INFO['source'] ?? 'remote_addr',
+    'client_chain' => $INGRESS_CLIENT_INFO['chain'] ?? [],
     'ua'    => $_SERVER['HTTP_USER_AGENT'] ?? '',
     'ctx'   => $ctx,
   ];
@@ -616,6 +844,12 @@ function smtp_addr(string $addr): string {
   return preg_replace('/[\r\n\s]+/', '', $addr);
 }
 
+$__INGRESS_CMD = ingress_current_cmd();
+$GLOBALS['INGRESS_CURRENT_CMD'] = $__INGRESS_CMD;
+if (!empty($GLOBALS['INGRESS_CONFIG_ISSUES']['fatal']) && !ingress_is_diagnostics_request($__INGRESS_CMD)) {
+  ingress_bootstrap_fail($GLOBALS['INGRESS_CONFIG_ISSUES']['fatal']);
+}
+
 // --- CORS & origin/referrer enforcement
 // ===================== CORS / ORIGIN GUARD =====================
 $origin  = $_SERVER['HTTP_ORIGIN'] ?? '';
@@ -671,7 +905,7 @@ if (($_GET['cmd'] ?? '') === 'version') {
 }
 
 // ===================== HEALTH (GET ?cmd=health) — only when DEBUG enabled =====================
-if (($_GET['cmd'] ?? '') === 'health') {
+if ($__INGRESS_CMD === 'health') {
   extra_cmds_check('health');
   $okSqlite = false; $err='';
   try {
@@ -682,8 +916,10 @@ if (($_GET['cmd'] ?? '') === 'health') {
     $okSqlite = file_exists($testPath);
     @unlink($testPath);
   } catch (Throwable $e) { $err=$e->getMessage(); }
+  $issues = $GLOBALS['INGRESS_CONFIG_ISSUES'];
+  $configOk = empty($issues['fatal']);
   echo json_encode([
-    'ok' => true,
+    'ok' => ($okSqlite && $configOk),
     'debug' => true,
     'accept_payload' => $CFG['accept_payload'],
     'notify_targets' => $CFG['notify_targets'],
@@ -697,14 +933,24 @@ if (($_GET['cmd'] ?? '') === 'health') {
     'sqlite_writable' => $okSqlite,
     'storage_dir' => $CFG['storage_dir'],
     'error' => $err ?: null,
+    'config_ok' => $configOk,
+    'config_issues' => $issues,
   ]);
   exit;
 }
 
 // ===================== CONFIG SELF-TEST (GET ?cmd=check) =====================
-if (($_GET['cmd'] ?? '') === 'check') {
+if ($__INGRESS_CMD === 'check') {
   extra_cmds_check('check');
   $errors = []; $warnings = []; $info = [];
+
+  $issues = $GLOBALS['INGRESS_CONFIG_ISSUES'];
+  foreach ($issues['fatal'] as $fatalIssue) {
+    $errors[] = $fatalIssue;
+  }
+  foreach ($issues['warnings'] as $warnIssue) {
+    $warnings[] = $warnIssue;
+  }
 
   // Secret
   if (($CFG['secret'] ?? '') === 'CHANGE_ME_LONG_RANDOM') {
@@ -1161,7 +1407,16 @@ if (($_GET['cmd'] ?? '') === 'token') {
 // --- Submission entrypoint
 // ===================== ONLY POST FOR SUBMISSIONS =====================
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') json_fail(405, 'Method not allowed');
-$ip = $_SERVER['REMOTE_ADDR'] ?? '';
+$clientInfo = ingress_resolve_client_ip($CFG);
+$GLOBALS['INGRESS_CLIENT_INFO'] = $clientInfo;
+$ip = $clientInfo['ip'] ?? ($_SERVER['REMOTE_ADDR'] ?? '');
+if ($ip === '' && isset($clientInfo['remote_addr'])) {
+  $ip = (string)$clientInfo['remote_addr'];
+}
+if (!ingress_ip_is_valid($ip) && isset($clientInfo['remote_addr']) && ingress_ip_is_valid((string)$clientInfo['remote_addr'])) {
+  $ip = (string)$clientInfo['remote_addr'];
+}
+$_SERVER['INGRESS_CLIENT_IP'] = $ip;
 $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
 
 // --- Content-type negotiation
@@ -1173,6 +1428,9 @@ $payload = [];
 if ($mode === 'json') {
   if (strpos($ctype, 'application/json') === false) json_fail(415, 'Only application/json accepted');
   $raw = file_get_contents('php://input');
+  if (($raw === '' || $raw === false) && isset($_SERVER['INGRESS_TEST_BODY'])) {
+    $raw = (string)$_SERVER['INGRESS_TEST_BODY'];
+  }
   $payload = json_decode($raw ?: '[]', true);
   if (!is_array($payload)) json_fail(400, 'Invalid JSON');
 }
@@ -1183,6 +1441,9 @@ elseif ($mode === 'form') {
 else { // both
   if (strpos($ctype, 'application/json') !== false) {
     $raw = file_get_contents('php://input');
+    if (($raw === '' || $raw === false) && isset($_SERVER['INGRESS_TEST_BODY'])) {
+      $raw = (string)$_SERVER['INGRESS_TEST_BODY'];
+    }
     $payload = json_decode($raw ?: '[]', true);
     if (!is_array($payload)) json_fail(400, 'Invalid JSON');
   } else {

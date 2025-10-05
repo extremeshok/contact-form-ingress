@@ -10,5 +10,4 @@ This project aims to support the latest PHP versions (currently 8.1+). Security 
 
 ## Contact
 
-Please email: security@example.com
-
+Please email: admin@extremeshok.com

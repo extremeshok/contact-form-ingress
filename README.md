@@ -4,6 +4,9 @@ A secure, schema-less intake endpoint (`ingress.php`) for static websites. It re
 
 Quick start examples: see `examples/README.md` for a list of ready-to-run forms (simple, full, JSON submit, built-in CAPTCHA, and provider integrations).
 
+### Self-test harness
+- `php tests/run.php` exercises configuration guards, proxy-aware client IP resolution, happy-path submissions, duplicate suppression, and rate limiting. Run it after local changes; GitHub Actions executes the same script automatically (see "Automated testing").
+
 ### Features
 - CSRF/bot token (double-submit cookie) with dwell-time check
 - Origin/Referrer allow-list (CORS)
@@ -50,19 +53,32 @@ The script works out-of-the-box, but you must set SMTP to actually send mail. Co
 
 Note: This project uses a single configuration mechanism: `config.ingress.php`.
 
+### Configuration checklist (do this before deploying)
+- Replace the default `secret` value with a long, random string (16+ characters).
+- Replace `json_forward_secret` with your own secret even if JSON forwarding is disabled. The bootstrap guard halts requests if placeholders remain.
+- Configure SMTP credentials (`smtp.host`, `smtp.user`, `smtp.pass`, `smtp.port`, `smtp.secure`) or disable the `email` notify target.
+- Set `allowed_origins` to the exact scheme+host combinations that should post to the endpoint.
+- If you run behind a reverse proxy or load balancer, enable the `proxy` block so rate limiting and dedupe use the true client IP.
+- Review anti-abuse thresholds (`min_*`, `rate_limit`, `dedupe_window_sec`) to match your audience volume.
+
 ### Example `config.ingress.php`
 
 ```php
 <?php
 return [
-  'secret' => 'CHANGE_ME_LONG_RANDOM',
+  // Required secrets — replace these placeholders
+  'secret' => 'YOUR_LONG_RANDOM_SECRET_HERE',
+  'json_forward_secret' => 'YOUR_FORWARD_SECRET_HERE',
+
+  // Allowed front-end origins (scheme + host)
   'allowed_origins' => ['https://example.com','http://localhost'],
+
   'email' => [
     'to' => ['you@example.com'],
     'subject_prefix' => 'Example :: New enquiry — ',
   ],
   'smtp' => [
-    'host' => 'smtp.example.com',
+    'host' => 'smtp.example.com',      // replace with your MTA
     'user' => 'you@example.com',
     'pass' => 'APP_PASSWORD',
     'port' => 587,
@@ -70,9 +86,17 @@ return [
     'auth' => 'login',
     'helo' => 'example.com',
   ],
+
   // Optional webhook forward
   'json_forward_url' => '',
-  'json_forward_secret' => '',
+
+  // Optional proxy/LB trust chain (enable and set your own trusted proxies)
+  'proxy' => [
+    'enabled' => false,
+    'trusted_proxies' => ['203.0.113.10'], // replace with your proxy/load balancer addresses
+    'trusted_headers' => ['x-forwarded-for','x-real-ip'],
+    'max_chain' => 5,
+  ],
 
   // Optional CAPTCHA (choose one provider and enable)
   'captcha' => [
@@ -102,13 +126,20 @@ return [
 ];
 ```
 
-Examples index: see `examples/README.md` for quick how‑to notes per example.
+Examples index: see `examples/README.md` for quick how‑to notes per example and the exact HTML snippets.
+
+### Proxy / load balancer support
+
+Reverse proxies terminate TLS and rewrite `REMOTE_ADDR` to the proxy’s address, which breaks rate limiting, dedupe and logging. Enable the `proxy` block to trust a fixed list of proxy CIDRs or IPs and to read client addresses from headers such as `X-Forwarded-For` or `X-Real-IP`. The first IP in the header chain that is not a trusted proxy becomes the request IP; a hard cap on header chain length (`max_chain`) guards against header abuse.
+
+Leave `proxy.enabled` set to `false` until you replace the sample addresses with the CIDRs/IPs that belong to your infrastructure; enabling it without edits may trust networks you do not control. The resolved client IP is exposed in logs and is stored in the SQLite submissions table, so reporting and anti-abuse match real visitors.
 
 ### Other useful knobs
 - `accept_payload`: `json` | `form` | `both` (default: `both`)
 - `notify_targets`: CSV of `email`, `n8n` (default: `email`)
 - `async_notify`: `'1'` to reply first (FastCGI only), then notify
 - `allowed_origins`: CORS allow‑list; `http://localhost` allows any localhost port
+- `proxy`: configure `enabled`, `trusted_proxies`, `trusted_headers`, `max_chain` to honour client IPs behind a load balancer
 - `site_keys`: optional allow‑list for a hidden `site_key` field
 - `min_*` validators: name, email, phone, message lengths
 - `allow_links_in_message`: false blocks common link protocols in message
@@ -116,23 +147,18 @@ Examples index: see `examples/README.md` for quick how‑to notes per example.
 
 ## Diagnostics (disabled by default)
 
-Enable via `$CFG['extra_cmds']`:
+Enable via `$CFG['extra_cmds']`.
 
-- `GET ?cmd=token` – mints CSRF cookie and returns token JSON
-- `GET ?cmd=health` – storage sanity check
-- `GET ?cmd=probe_smtp` – STARTTLS/auth probe (no email sent)
-- `GET ?cmd=version` – script version & PHP
-- `GET ?cmd=flush_queue` – process queued forwards (when queue enabled)
- - `GET ?cmd=check` – configuration self‑test (gated)
+| Endpoint | Purpose |
+| --- | --- |
+| `GET ?cmd=token` | Mint CSRF cookie/token JSON (used by forms) |
+| `GET ?cmd=check` | Configuration self-test with fatal/warning lists |
+| `GET ?cmd=health` | Storage write test + config issues echo |
+| `GET ?cmd=version` | Script/PHP version metadata |
+| `GET ?cmd=probe_smtp` | STARTTLS/auth probe (no email sent) |
+| `GET ?cmd=flush_queue` | Process queued JSON forwards |
 
-You can gate diagnostics with a key or IP allow list via `$CFG['extra_cmds']`.
-
-### Endpoints (GET)
-- `?cmd=token` — mints CSRF cookie and returns token JSON
-- `?cmd=version` — version info (gated by `extra_cmds.version`)
-- `?cmd=health` — storage sanity check (gated)
-- `?cmd=probe_smtp` — SMTP STARTTLS/auth probe (gated)
-- `?cmd=flush_queue` — flush queued forwards (gated)
+You can gate diagnostics with a key (`extra_cmds.key`) and/or IP allow list (`extra_cmds.allow_ips`).
 
 ## Queue (optional)
 
@@ -170,7 +196,7 @@ Run via the system cron on your server. Adjust paths as needed.
 
 ## Embedding
 
-See `sample-form.html` for a basic HTML form, or `sample-json.html` for a JSON example. The form auto-mints a CSRF cookie on load and adds a dwell-time hidden field on submit.
+See `examples/simple-form.html` for a basic HTML form, or `examples/json-submit.html` for a JSON example. Each example fetches `?cmd=token` on load to mint the CSRF cookie/token, enforces dwell time, and posts to `/ingress.php` by default.
 
 ### CAPTCHA (optional)
 
@@ -194,10 +220,11 @@ Notes:
 - On success: `{ "ok": true, "ref": "..." }`
 - On error: `{ "ok": false, "error": "..." }`
 - Response headers:
-  - `X-Submission-Ref`: reference id
+  - `X-Submission-Ref`: reference id (always present on success)
   - `X-Duplicate`: `1` when a duplicate was detected within the suppression window
   - `X-RateLimit-Remaining`: remaining submissions in the current window
   - `Retry-After`: seconds (set on `429 Too Many Requests`)
+  - `X-Client-IP`: echoed in outbound email headers for logging/audit
 
 ## Storage & files
 - Submissions and rate limits are stored in a SQLite DB created outside the web root when possible (dot‑prefixed filenames).
@@ -227,9 +254,16 @@ Notes:
 
 Issues and PRs welcome. Please keep changes focused and small. Add tests or curl repro steps where practical.
 
-## CI
+## Automated testing (GitHub Actions)
 
-GitHub Actions runs a basic CI: PHP lint and a smoke test against the token endpoint using PHP’s built-in server.
+GitHub-hosted runners execute the same checks that you can run locally:
+
+```
+php -l ingress.php tests/preload.php tests/config.test.php tests/run.php
+php tests/run.php
+```
+
+The workflow runs on every push and pull request, ensuring placeholder secrets are caught, proxy resolution stays intact, and rate limiting/duplicate detection behave as expected.
 
 ## License
 

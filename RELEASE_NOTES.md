@@ -1,5 +1,15 @@
 # Contact Form Ingress — Release Notes
 
+## 1.1.0 — Configuration guard & proxy awareness
+
+Highlights
+- Request bootstrap now fails fast when placeholder secrets (form `secret`, `json_forward_secret`, SMTP host/user/pass) remain, preventing accidental production launches with insecure defaults.
+- Health and config self-test endpoints surface the same fatal/warning lists to aid ops dashboards.
+- Added proxy-aware IP resolution with trusted header/CIDR allow lists so rate limiting, dedupe, and logging reflect the real client IP when behind a load balancer.
+- Added a PHP-based self-test harness (`php tests/run.php`) that covers bootstrap guards, proxy resolution, happy-path submissions, duplicate suppression, and rate limiting.
+- Introduced a GitHub Actions workflow that lints PHP files and runs the self-test harness on every push/PR.
+- Expanded docs to include configuration checklist, proxy guidance, and testing instructions.
+
 ## 1.0.1 — Initial public release
 
 Highlights
@@ -25,4 +35,3 @@ CLI helpers
 Notes
 - See `examples/README.md` for example usage.
 - See main `README.md` for full configuration and feature documentation.
-
